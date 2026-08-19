@@ -121,6 +121,12 @@
   .progress-track{height:2px; background:var(--hairline); width:100%; position:relative; margin-bottom:26px;}
   .progress-fill{height:2px; background:var(--gold); width:0%; transition:width .3s;}
   .q-index{font-family:'Noto Serif TC',serif; font-weight:700; font-size:13px; color:var(--gold-soft); letter-spacing:0.12em; margin-bottom:16px;}
+  .quiz-timer{
+    font-family:'Noto Serif TC',serif; font-weight:700; font-size:14px; letter-spacing:0.05em;
+    color:var(--gold-soft); background:var(--bg-panel-2); border:1px solid var(--hairline);
+    padding:6px 16px; border-radius:20px; white-space:nowrap;
+  }
+  .quiz-timer.timer-expired, .quiz-timer.timer-warning{color:var(--r-soft); border-color:rgba(239,68,68,0.35); background:rgba(239,68,68,0.08);}
   .q-text{font-family:'Noto Serif TC',serif; font-size:19px; line-height:1.7; margin-bottom:26px;}
   .option{
     display:flex; align-items:flex-start; gap:14px; width:100%; text-align:left;
@@ -129,6 +135,7 @@
     transition:border-color .2s, background .2s, transform .15s; font-family:'Noto Sans TC',sans-serif;
   }
   .option:hover{border-color:var(--gold); background:#FFEAC6; transform:translateX(2px);}
+  .option.selected{border-color:var(--gold); background:#FFEAC6; box-shadow:0 0 0 1px var(--gold) inset;}
   .opt-letter{
     flex-shrink:0; width:24px; height:24px; border:1px solid var(--gold); color:var(--gold-soft);
     border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px;
@@ -381,9 +388,11 @@
         性格色彩測試，請注意以下事項：
       </p>
       <ul class="clean" style="margin-top:12px;">
-        <li style="font-size:16px;">(1) 每組只選一個答案，要做完所有題目</li>
-        <li style="font-size:16px;">(2) 請選擇讓你「最直覺的」反應，而非思考「最好的」答案</li>
-        <li style="font-size:16px;">(3) 請關注內心而非工作狀態，若你實在無法選擇，請回憶若是小時候會怎麼選</li>
+        <li style="font-size:16px;">(1) 作答時間以5分鐘為限</li>
+        <li style="font-size:16px;">(2) 題目作答後無法返回上一題</li>
+        <li style="font-size:16px;">(3) 每組只選一個答案，要做完所有題目</li>
+        <li style="font-size:16px;">(4) 請選擇讓你「最直覺的」反應，而非思考「最好的」答案</li>
+        <li style="font-size:16px;">(5) 請關注內心而非工作狀態，若你實在無法選擇，請回憶若是小時候會怎麼選</li>
       </ul>
       <div class="row">
         <button class="btn" id="instructionsContinueBtn">開始測驗</button>
@@ -396,9 +405,15 @@
   <div class="screen" id="screen-quiz">
     <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
     <div class="panel">
-      <div class="q-index" id="qIndex">01 / 30</div>
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+        <div class="q-index" id="qIndex" style="margin-bottom:0;">01 / 30</div>
+        <div class="quiz-timer" id="quizTimer">05:00</div>
+      </div>
       <div class="q-text" id="qText">—</div>
       <div id="optionList"></div>
+      <div class="row" style="margin-top:10px;">
+        <button class="btn" id="quizNextBtn" disabled>下一題</button>
+      </div>
     </div>
   </div>
 
@@ -769,6 +784,7 @@
   $("instructionsContinueBtn").addEventListener("click", function(){
     state.answers = [];
     renderQuestion(0);
+    startQuizTimer();
     showScreen("screen-quiz");
   });
   $("instructionsBackBtn").addEventListener("click", function(){
@@ -830,12 +846,20 @@
   });
 
   // ---------- quiz ----------
+  var quizCurrentIndex = 0;
+  var quizSelectedLetter = null;
+
   function renderQuestion(idx){
     var total = QUESTIONS.length;
     var item = QUESTIONS[idx];
+    quizCurrentIndex = idx;
+    quizSelectedLetter = null;
     $("qIndex").textContent = String(idx+1).padStart(2,"0") + " / " + total;
     $("qText").textContent = (idx+1) + ". " + item.q;
     $("progressFill").style.width = Math.round((idx/total)*100) + "%";
+    var nextBtn = $("quizNextBtn");
+    nextBtn.disabled = true;
+    nextBtn.textContent = (idx === total - 1) ? "產出診斷報告" : "下一題";
     var list = $("optionList");
     list.innerHTML = "";
     item.opts.forEach(function(opt){
@@ -843,16 +867,78 @@
       btn.className = "option";
       btn.innerHTML = '<span class="opt-letter">'+opt.letter+'</span><span>'+opt.t+'</span>';
       btn.addEventListener("click", function(){
-        state.answers[idx] = opt.letter;
-        if(idx+1 < total){
-          renderQuestion(idx+1);
-        } else {
-          $("progressFill").style.width = "100%";
-          finishQuiz();
-        }
+        quizSelectedLetter = opt.letter;
+        Array.prototype.forEach.call(list.querySelectorAll(".option"), function(o){
+          o.classList.remove("selected");
+        });
+        btn.classList.add("selected");
+        nextBtn.disabled = false;
       });
       list.appendChild(btn);
     });
+  }
+
+  $("quizNextBtn").addEventListener("click", function(){
+    if(!quizSelectedLetter){ return; }
+    var total = QUESTIONS.length;
+    state.answers[quizCurrentIndex] = quizSelectedLetter;
+    if(quizCurrentIndex + 1 < total){
+      renderQuestion(quizCurrentIndex + 1);
+    } else {
+      $("progressFill").style.width = "100%";
+      finishQuiz();
+    }
+  });
+
+  // ---------- quiz timer (5 min countdown, does not block answering) ----------
+  var QUIZ_DURATION_SECONDS = 5 * 60;
+  var quizTimeLeft = QUIZ_DURATION_SECONDS;
+  var quizTimerInterval = null;
+  var quizTimeExpired = false;
+
+  function updateTimerDisplay(){
+    var timerEl = $("quizTimer");
+    if(quizTimeExpired){
+      timerEl.textContent = "時間已到";
+      timerEl.classList.add("timer-expired");
+      return;
+    }
+    var m = Math.floor(quizTimeLeft / 60);
+    var s = quizTimeLeft % 60;
+    timerEl.textContent = String(m).padStart(2,"0") + ":" + String(s).padStart(2,"0");
+    if(quizTimeLeft <= 60){
+      timerEl.classList.add("timer-warning");
+    } else {
+      timerEl.classList.remove("timer-warning");
+    }
+  }
+
+  function startQuizTimer(){
+    quizTimeLeft = QUIZ_DURATION_SECONDS;
+    quizTimeExpired = false;
+    $("quizTimer").classList.remove("timer-expired");
+    $("quizTimer").classList.remove("timer-warning");
+    updateTimerDisplay();
+    if(quizTimerInterval){ clearInterval(quizTimerInterval); }
+    quizTimerInterval = setInterval(function(){
+      quizTimeLeft--;
+      if(quizTimeLeft <= 0){
+        quizTimeLeft = 0;
+        quizTimeExpired = true;
+        updateTimerDisplay();
+        clearInterval(quizTimerInterval);
+        quizTimerInterval = null;
+        return;
+      }
+      updateTimerDisplay();
+    }, 1000);
+  }
+
+  function stopQuizTimer(){
+    if(quizTimerInterval){
+      clearInterval(quizTimerInterval);
+      quizTimerInterval = null;
+    }
   }
 
   // ---------- scoring (official FPA formula) ----------
@@ -874,6 +960,7 @@
   }
 
   function finishQuiz(){
+    stopQuizTimer();
     var scores = computeScores();
     var ranked = COLORS.slice().sort(function(a,b){ return scores[b]-scores[a]; });
     var primary = ranked[0], secondary = ranked[1];
