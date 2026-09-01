@@ -263,7 +263,7 @@
   }
 
   @media print{
-    .top-bar, #resultActions, #pdfStatusMsg, .screen:not(#screen-result){ display:none !important; }
+    .top-bar, #resultActions, #pdfStatusMsg, #teamReportPdfBtn, #teamReportBackBtn, #teamReportStatusMsg, .screen:not(#screen-result):not(#screen-team-report){ display:none !important; }
     body{ background:#fff !important; padding:0; }
     .stage{ margin-top:0; max-width:100%; }
     #reportCapture{ color:#1a1a1a; }
@@ -526,12 +526,18 @@
       <div class="sub-heading">3) 團隊互動盲點</div>
       <ul class="clean" id="teamBlindSpots"></ul>
 
+      <div class="section-title">個別成員色彩缺口提醒</div>
+      <p class="sub" style="margin-top:0; font-size:13px;">列出四色分數中，任一色彩得分 ≤2 分的成員，提示其潛在的風險或需留意之處。</p>
+      <ul class="clean" id="teamIndividualAlerts"></ul>
+
       <div class="section-title">管理意涵與行動建議</div>
       <ul class="clean" id="teamActions"></ul>
 
       <div class="row">
+        <button class="btn ghost" id="teamReportPdfBtn">匯出成 PDF</button>
         <button class="link-btn" id="teamReportBackBtn">← 返回人資部總覽</button>
       </div>
+      <div class="status-msg" id="teamReportStatusMsg"></div>
     </div>
   </div>
 
@@ -1292,6 +1298,7 @@
 
   var lastRosterData = [];
   var lastScopedRoster = [];
+  var lastTeamReportData = null;
 
   function loadRoster(){
     var content = $("rosterContent");
@@ -1339,12 +1346,14 @@
       var timeStr = t.toLocaleString("zh-TW", {month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit"});
       var isSingleCore = r.scores[r.primary] >= 15 && r.scores[r.secondary] <= 10;
       var secondaryCell = isSingleCore ? '<span style="color:var(--muted);">—</span>' : (META[r.secondary].name+'('+META[r.secondary].persona+')');
+      var sortedScoreText = COLORS.slice().sort(function(a,b){ return r.scores[b]-r.scores[a]; })
+        .map(function(c){ return c+r.scores[c]; }).join(" / ");
       return '<tr class="roster-row" data-idx="'+idx+'">'+
         '<td>'+escapeHtml(r.name)+'</td>'+
         (isAdmin ? '<td>'+escapeHtml(r.companyName || "—")+'</td>' : '') +
         '<td><span class="dot-lg" style="background:'+getColorHex(r.primary)+';display:inline-block;margin-right:6px;"></span>'+META[r.primary].name+'('+META[r.primary].persona+')</td>'+
         '<td>'+secondaryCell+'</td>'+
-        '<td>R'+r.scores.R+' / Y'+r.scores.Y+' / B'+r.scores.B+' / G'+r.scores.G+'</td>'+
+        '<td>'+sortedScoreText+'</td>'+
         '<td>'+timeStr+'</td>'+
         '<td><button class="del-btn" data-idx="'+idx+'" type="button">刪除</button></td>'+
         '</tr>';
@@ -1435,6 +1444,13 @@
       '<div class="dist-chart">' + rows + '</div>';
   }
 
+  var LOW_SCORE_RISK = {
+    R:"幾乎沒有行動者特質，面對高壓、高不確定性或需要快速應變的任務時，可能顯得猶豫、啟動慢，較依賴他人推一把才會採取行動。",
+    Y:"幾乎沒有領導者特質，較不擅長主動設定目標或果斷拍板，遇到需要當機立斷的情境時，容易猶豫不決或過度依賴他人做決定。",
+    B:"幾乎沒有思想者特質，處理任務時可能較不注重細節與嚴謹度，重要決策或交付物建議安排他人複核，避免風險與疏漏被忽略。",
+    G:"幾乎沒有支持者特質，人際敏感度與耐心可能相對較低，溝通時容易顯得直接甚至無意間傷人，需留意團隊感受與衝突處理方式。"
+  };
+
   var TEAM_TRAITS = {
     R:{
       label:"行動者",
@@ -1469,10 +1485,14 @@
     var pct = {};
     COLORS.forEach(function(c){ pct[c] = total > 0 ? Math.round((counts[c]/total)*100) : 0; });
     var ranked = COLORS.slice().sort(function(a,b){ return counts[b]-counts[a]; });
-    var dominant = ranked.filter(function(c){ return pct[c] >= 30; });
-    if(dominant.length === 0){ dominant = [ranked[0]]; }
+    var trueDominant = ranked.filter(function(c){ return pct[c] >= 30; });
+    var isBalanced = trueDominant.length === 0;
+    var dominant = isBalanced ? [ranked[0]] : trueDominant;
     var weak = COLORS.filter(function(c){ return pct[c] <= 10; });
-    return { counts:counts, pct:pct, ranked:ranked, dominant:dominant, weak:weak, total:total };
+    var FAST = ["R","Y"], SLOW = ["B","G"];
+    var hasFastDominant = dominant.some(function(c){ return FAST.indexOf(c) !== -1; });
+    var hasSlowDominant = dominant.some(function(c){ return SLOW.indexOf(c) !== -1; });
+    return { counts:counts, pct:pct, ranked:ranked, dominant:dominant, weak:weak, total:total, isBalanced:isBalanced, hasFastDominant:hasFastDominant, hasSlowDominant:hasSlowDominant };
   }
 
   function generateTeamReport(scoped, scopeLabel){
@@ -1490,67 +1510,145 @@
     }).join("");
     $("teamDistChart").innerHTML = rows;
 
-    var summary = "本次分析共涵蓋 "+a.total+" 位成員的測驗結果。團隊主色以「"+domNames+"」為主要組成";
-    if(a.dominant.length === 1){
-      summary += "，性格色彩集中度較高，團隊行事風格與決策慣性相對一致。";
-    } else {
-      summary += "，屬於多元組合的團隊，不同性格色彩的比例較為接近，決策與協作風格較具多樣性。";
+    // ---- summary (multiple paragraphs) ----
+    var summaryParas = [];
+    var p1 = "本次分析共涵蓋 "+a.total+" 位成員的測驗結果";
+    if(a.total < 5){
+      p1 += "（樣本人數較少，統計上的代表性有限，觀察結果建議搭配實際訪談交叉驗證）";
     }
+    p1 += "。";
+    if(a.isBalanced){
+      p1 += "團隊四色分布相對平均，沒有單一色彩佔比達到 30% 以上，屬於「多元均衡型」團隊，各種決策與協作風格並存，目前占比最高的是「"+META[a.ranked[0]].name+"（"+a.pct[a.ranked[0]]+"%）」，但優勢並不明顯。";
+    } else if(a.dominant.length === 1){
+      p1 += "團隊主色明顯集中在「"+domNames+"」（"+a.pct[a.dominant[0]]+"%），性格色彩集中度較高，團隊行事風格、溝通節奏與決策慣性會高度受這個色彩的特質主導。";
+    } else {
+      p1 += "團隊主色由「"+domNames+"」共同組成（分別為 "+a.dominant.map(function(c){return a.pct[c]+"%";}).join("、")+"），屬於雙主色（或多主色）團隊，決策與協作風格會在這幾種色彩的傾向之間拉扯與互補。";
+    }
+    summaryParas.push(p1);
+
     if(a.weak.length > 0){
       var weakNames = a.weak.map(function(c){ return META[c].name+"("+META[c].persona+")"; }).join("、");
-      summary += "相對地，「"+weakNames+"」在團隊中的比例偏低，代表這類特質的功能在團隊中較不容易自然發生，需要額外留意補強。";
+      summaryParas.push("相對地，「"+weakNames+"」在團隊中的比例偏低（≤10%），代表這類特質對應的行為功能，在團隊中較不容易自然發生，需要仰賴少數成員或制度設計來補位。");
     }
-    $("teamSummary").innerHTML = "<p>"+escapeHtml(summary)+"</p>";
 
+    if(a.hasFastDominant && a.hasSlowDominant){
+      summaryParas.push("團隊同時存在偏「快」（紅色／黃色）與偏「慢」（藍色／綠色）的主導色彩，實際決策速度可能因當下發言主導者而有落差，建議事先約定好「什麼層級的決定要快、什麼層級要慢下來討論」，避免步調認知不一致造成摩擦。");
+    } else if(a.hasFastDominant){
+      summaryParas.push("團隊整體步調偏向快速行動、先做再說，優點是推進力強、士氣容易帶動，但也要留意事前規劃與風險評估是否足夠。");
+    } else if(a.hasSlowDominant){
+      summaryParas.push("團隊整體步調偏向謹慎深思、重視品質與和諧，優點是穩定度高、出錯率低，但也要留意反應速度與變革適應力是否足夠。");
+    }
+    $("teamSummary").innerHTML = summaryParas.map(function(t){ return "<p>"+escapeHtml(t)+"</p>"; }).join("");
+
+    // ---- strengths ----
     var strengthBullets = [];
     a.dominant.forEach(function(c){
-      TEAM_TRAITS[c].strength.slice(0,2).forEach(function(t){ strengthBullets.push("["+META[c].name+"] "+t); });
+      TEAM_TRAITS[c].strength.forEach(function(t){ strengthBullets.push("["+META[c].name+"] "+t); });
     });
+    if(a.dominant.length >= 2){
+      strengthBullets.push("["+domNames+" 綜合] 多種主導色彩並存，團隊在面對不同任務時，較有機會依情境彈性切換行事風格，不會被單一慣性綁死。");
+    }
     fillList("teamStrengths", strengthBullets);
 
+    // ---- risks ----
     var riskBullets = [];
     a.dominant.forEach(function(c){
-      TEAM_TRAITS[c].risk.slice(0,2).forEach(function(t){ riskBullets.push("["+META[c].name+"] "+t); });
+      TEAM_TRAITS[c].risk.forEach(function(t){ riskBullets.push("["+META[c].name+"] "+t); });
     });
     a.weak.forEach(function(c){
       TEAM_TRAITS[c].missing.forEach(function(t){ riskBullets.push("["+META[c].name+"偏低] "+t); });
     });
+    if(a.isBalanced){
+      riskBullets.push("[整體] 由於沒有明顯主導色彩，團隊也可能缺乏一致的決策慣性，遇到需要快速統一步調的情境時，容易出現各說各話、莫衷一是的狀況。");
+    }
     fillList("teamRisks", riskBullets);
 
+    // ---- blind spots ----
     var blindBullets = [];
     if(a.dominant.length >= 2){
-      var c1 = a.dominant[0], c2 = a.dominant[1];
-      var rel = (PROFILE[c1] && PROFILE[c1].relations && PROFILE[c1].relations[c2]) ? PROFILE[c1].relations[c2] : null;
-      if(rel){
-        blindBullets.push("["+META[c1].name+" × "+META[c2].name+"] "+rel[0]);
+      for(var i=0;i<a.dominant.length;i++){
+        for(var j=i+1;j<a.dominant.length;j++){
+          var c1 = a.dominant[i], c2 = a.dominant[j];
+          var rel12 = (PROFILE[c1] && PROFILE[c1].relations && PROFILE[c1].relations[c2]) ? PROFILE[c1].relations[c2][0] : null;
+          var rel21 = (PROFILE[c2] && PROFILE[c2].relations && PROFILE[c2].relations[c1]) ? PROFILE[c2].relations[c1][0] : null;
+          if(rel12){ blindBullets.push("["+META[c1].name+" 視角看 "+META[c2].name+"] "+rel12); }
+          if(rel21){ blindBullets.push("["+META[c2].name+" 視角看 "+META[c1].name+"] "+rel21); }
+        }
       }
     } else if(a.weak.length > 0){
-      blindBullets.push("團隊主色集中在「"+domNames+"」，與其他色彩互動的經驗較少，遇到不同風格的客戶、夥伴或新進成員時，可能較難快速調頻、換位思考。");
+      blindBullets.push("團隊主色高度集中在「"+domNames+"」，與其他色彩互動的經驗相對較少，遇到不同風格的客戶、夥伴或新進成員時，可能較難快速調頻、換位思考。");
     }
-    if(a.ranked[0] === "Y" || a.dominant.indexOf("Y") !== -1){
+    if(a.dominant.indexOf("Y") !== -1){
       blindBullets.push("黃色成員的直接與高壓風格，容易讓其他色彩的成員選擇沉默配合而非表達真實意見，長期下來可能出現「表面共識、私下不認同」的隱性落差。");
     }
+    if(a.dominant.indexOf("G") !== -1 && a.dominant.indexOf("R") !== -1){
+      blindBullets.push("紅色成員的高昂情緒與快速推進，容易讓綠色成員來不及消化就被迫跟上，若沒有適時放慢，綠色成員可能累積壓力卻不主動反映。");
+    }
     if(blindBullets.length === 0){
-      blindBullets.push("團隊各色彩分布相對均衡，互動盲點較不明顯，但仍建議定期檢視跨風格協作時的溝通品質。");
+      blindBullets.push("團隊各色彩分布相對均衡，互動盲點較不明顯，但仍建議定期檢視跨風格協作時的溝通品質，避免盲點在規模擴大後才浮現。");
     }
     fillList("teamBlindSpots", blindBullets);
 
+    // ---- individual low-score alerts (any color <=2) ----
+    var byMember = {};
+    var memberOrder = [];
+    scoped.forEach(function(r){
+      COLORS.forEach(function(c){
+        if(r.scores[c] <= 2){
+          if(!byMember[r.name]){ byMember[r.name] = []; memberOrder.push(r.name); }
+          byMember[r.name].push(c);
+        }
+      });
+    });
+    var individualBullets = memberOrder.map(function(name){
+      var colors = byMember[name];
+      var colorLabel = colors.map(function(c){ return META[c].name+"("+c+")"; }).join("、");
+      var riskText = colors.map(function(c){ return LOW_SCORE_RISK[c]; }).join(" ");
+      return name + "：" + colorLabel + " 分數偏低（≤2分）。" + riskText;
+    });
+    if(individualBullets.length === 0){
+      individualBullets.push("目前團隊成員中，沒有人在任何色彩上出現極端低分（≤2分），暫無需要特別留意的個別色彩缺口。");
+    }
+    fillList("teamIndividualAlerts", individualBullets);
+
+    // ---- actions ----
     var actionBullets = [];
     if(a.weak.length > 0){
       var weakList = a.weak.map(function(c){ return META[c].name+"("+META[c].persona+")"; }).join("、");
-      actionBullets.push("在招募、選才或跨部門調度時，可適度優先考慮「"+weakList+"」特質的人選，補足團隊目前較缺乏的功能。");
+      actionBullets.push("在招募、選才或跨部門調度時，可適度優先考慮「"+weakList+"」特質的人選，補足團隊目前較缺乏的功能，而非只憑經驗與學歷篩選。");
     }
-    if(a.dominant.indexOf("Y") !== -1 || a.dominant.indexOf("R") !== -1){
-      actionBullets.push("建議在重大決策前，安排「藍色思想者」角色進行風險與細節複核，作為決策的最後一道防線。");
+    if(a.dominant.indexOf("B") === -1 && (a.dominant.indexOf("Y") !== -1 || a.dominant.indexOf("R") !== -1)){
+      actionBullets.push("團隊缺乏藍色思想者的把關視角，建議在重大決策前，額外安排一次「風險與細節複核」的檢查點，作為決策前的最後一道防線。");
     }
     if(a.dominant.indexOf("B") !== -1 && a.pct["B"] >= 40){
-      actionBullets.push("團隊決策節奏若明顯偏慢，可指定專人（如黃色領導者）負責拍板與時程掌控，避免過度討論導致錯失時機。");
+      actionBullets.push("團隊決策節奏若明顯偏慢，可指定專人（例如黃色領導者，或授權窗口）負責拍板與時程掌控，避免過度討論導致錯失時機。");
     }
     if(a.dominant.indexOf("G") !== -1){
       actionBullets.push("鼓勵綠色成員練習在會議當下具體表達意見與底線，管理者也應主動詢問「有沒有不同想法」，避免沉默被誤讀為認同。");
     }
-    actionBullets.push("建議每季重新檢視團隊性格色彩分布，觀察組成變化，並將此作為團隊發展與人才配置的參考依據之一。");
+    if(a.dominant.indexOf("G") === -1 && a.weak.indexOf("G") !== -1){
+      actionBullets.push("團隊缺乏綠色支持者的潤滑角色，建議管理者本身多留意會議中的情緒溫度，必要時主動介入緩和衝突，避免問題在爭論中被放大。");
+    }
+    if(a.dominant.indexOf("R") !== -1 && a.pct["R"] >= 40){
+      actionBullets.push("紅色主導的團隊執行力強但容易虎頭蛇尾，建議搭配簡單的任務追蹤機制（如每週檢核表），確保承諾的事項確實被完成。");
+    }
+    if(a.isBalanced){
+      actionBullets.push("團隊目前沒有明顯主導色彩，屬於多元組合，建議善用這個優勢，依任務性質指派不同風格的成員主責（例如創意發想找紅色、把關風險找藍色），而非固定用同一套流程套用在所有任務上。");
+    }
+    actionBullets.push("建議每季重新檢視團隊性格色彩分布，觀察組成變化，並將此作為團隊發展、人才配置與領導風格調整的參考依據之一。");
     fillList("teamActions", actionBullets);
+
+    lastTeamReportData = {
+      title: $("teamReportTitle").textContent,
+      meta: $("teamReportMeta").textContent,
+      distHtml: rows,
+      summaryHtml: summaryParas.map(function(t){ return "<p>"+escapeHtml(t)+"</p>"; }).join(""),
+      strengthBullets: strengthBullets,
+      riskBullets: riskBullets,
+      blindBullets: blindBullets,
+      individualBullets: individualBullets,
+      actionBullets: actionBullets
+    };
   }
 
   $("teamReportBtn").addEventListener("click", function(){
@@ -1575,6 +1673,72 @@
   $("teamReportBackBtn").addEventListener("click", function(){
     showScreen("screen-roster");
   });
+
+  function exportTeamReportPDF(){
+    var statusEl = $("teamReportStatusMsg");
+    if(!lastTeamReportData){
+      statusEl.textContent = "找不到報告資料,請重新產生團隊診斷報告後再試一次。";
+      return;
+    }
+    var d = lastTeamReportData;
+
+    function esc(s){ return escapeHtml(String(s == null ? "" : s)); }
+    function listHtml(arr){ return "<ul>" + arr.map(function(t){ return "<li>"+esc(t)+"</li>"; }).join("") + "</ul>"; }
+
+    var html = '<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="UTF-8">' +
+      '<title>' + esc(d.title) + '</title>' +
+      '<style>' +
+      'body{font-family:"Noto Serif TC","Noto Sans TC","PingFang TC","Microsoft JhengHei",serif; background:#f7f4ee; color:#181510; margin:0; padding:40px 24px; font-weight:500;}' +
+      '.wrap{max-width:760px; margin:0 auto;}' +
+      'h1{font-size:30px; font-weight:900; margin:0 0 6px; color:#141109;}' +
+      '.eyebrow{font-size:16px; font-weight:900; letter-spacing:0.14em; color:#8a6416; text-transform:uppercase; margin-bottom:6px;}' +
+      '.meta{font-size:14px; color:#6b6250; margin-bottom:20px;}' +
+      '.section-title{font-size:20px; font-weight:900; color:#7a5810; border-bottom:2px solid #cdb576; padding-bottom:8px; margin:28px 0 12px;}' +
+      '.sub-heading{font-size:16px; font-weight:800; color:#7a5810; margin:14px 0 6px;}' +
+      'p{font-size:15.5px; font-weight:500; line-height:1.9; margin:0 0 10px; color:#181510; text-align:justify; text-justify:inter-character;}' +
+      'ul{margin:0; padding-left:20px;}' +
+      'li{font-size:15px; font-weight:500; line-height:1.8; margin-bottom:8px; color:#181510;}' +
+      '.dist-row{display:flex; align-items:center; gap:12px; margin-bottom:12px;}' +
+      '.dist-label{width:150px; font-size:13px; color:#4a4432; flex-shrink:0; display:flex; align-items:center; gap:8px;}' +
+      '.dist-bar-track{flex:1; height:14px; background:#f0e9d8; border-radius:8px; overflow:hidden; border:1px solid #e0d3b4;}' +
+      '.dist-bar-fill{height:100%; border-radius:8px;}' +
+      '.dist-value{width:90px; text-align:right; font-size:12.5px; color:#4a4432; flex-shrink:0;}' +
+      '.dot-lg{width:10px; height:10px; border-radius:50%; flex-shrink:0; display:inline-block;}' +
+      '.footer{margin-top:36px; font-size:12px; font-weight:600; color:#4a4432; text-align:right;}' +
+      '@media print{ body{background:#fff;} }' +
+      '</style></head><body><div class="wrap">' +
+      '<div class="eyebrow">團隊性格色彩診斷報告</div>' +
+      '<h1>' + esc(d.title) + '</h1>' +
+      '<div class="meta">' + esc(d.meta) + '</div>' +
+      '<div class="section-title" style="margin-top:0;">主色分布統計</div>' + d.distHtml +
+      '<div class="section-title">團隊性格診斷摘要</div>' + d.summaryHtml +
+      '<div class="section-title">關鍵洞察與分析</div>' +
+      '<div class="sub-heading" style="margin-top:0;">1) 團隊結構優勢</div>' + listHtml(d.strengthBullets) +
+      '<div class="sub-heading">2) 團隊結構風險</div>' + listHtml(d.riskBullets) +
+      '<div class="sub-heading">3) 團隊互動盲點</div>' + listHtml(d.blindBullets) +
+      '<div class="section-title">個別成員色彩缺口提醒</div>' + listHtml(d.individualBullets) +
+      '<div class="section-title">管理意涵與行動建議</div>' + listHtml(d.actionBullets) +
+      '<div class="footer">Copyright © 2026 赫睿師管顧 維妮</div>' +
+      '</div></body></html>';
+
+    try{
+      var blob = new Blob([html], {type:"text/html;charset=utf-8;"});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = d.title.replace(/[\\\/:*?"<>|]/g, "") + ".html";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      statusEl.textContent = "報告檔案已下載,請開啟該檔案,並用瀏覽器的列印功能另存為 PDF。";
+    } catch(err){
+      console.error("團隊報告匯出失敗", err);
+      statusEl.textContent = "匯出失敗,請重新整理頁面後再試一次。";
+    }
+  }
+
+  $("teamReportPdfBtn").addEventListener("click", exportTeamReportPDF);
 
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g, function(m){
