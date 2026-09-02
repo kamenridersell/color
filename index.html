@@ -497,6 +497,7 @@
         <button class="btn ghost" id="refreshRosterBtn">重新整理</button>
         <button class="btn" id="exportExcelBtn">匯出 Excel</button>
         <button class="btn ghost" id="teamReportBtn">產生團隊診斷報告</button>
+        <button class="btn ghost" id="companyManageBtn" style="display:none;">開通公司帳號</button>
         <select class="company-filter" id="companyFilterSelect" style="display:none;"></select>
         <button class="link-btn" id="rosterBackBtn">← 返回首頁</button>
       </div>
@@ -542,6 +543,33 @@
     </div>
   </div>
 
+  <!-- ============ COMPANY MANAGE (system admin only) ============ -->
+  <div class="screen" id="screen-company-manage">
+    <div class="eyebrow">系統管理者</div>
+    <h1 class="display" style="font-size:clamp(22px,4vw,35px);">開通公司入口帳號</h1>
+    <div class="panel">
+      <div class="section-title" style="margin-top:0;">新增公司帳號</div>
+      <label for="cmName">公司名稱</label>
+      <input type="text" id="cmName" placeholder="例:國興集團" maxlength="40" autocomplete="off">
+      <label for="cmCode" style="margin-top:14px;">入口密碼(統一編號)</label>
+      <input type="text" id="cmCode" placeholder="請設定此公司的入口密碼" maxlength="30" autocomplete="off">
+      <label for="cmHrPw" style="margin-top:14px;">人資部密碼</label>
+      <input type="text" id="cmHrPw" placeholder="請設定此公司的人資部密碼" maxlength="30" autocomplete="off">
+      <div class="field-error" id="cmError"></div>
+      <div class="row">
+        <button class="btn" id="cmSaveBtn">建立公司帳號</button>
+      </div>
+      <div class="status-msg" id="cmStatus"></div>
+
+      <div class="section-title">目前已開通的公司</div>
+      <div id="cmList"></div>
+
+      <div class="row">
+        <button class="link-btn" id="cmBackBtn">← 返回人資部總覽</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <script>
@@ -576,9 +604,9 @@
   }
 
   var COMPANIES = {
-    guoxing:{ key:"guoxing", name:"國興集團中高階", code:"86660894001", admin:false },
-    guoxing_pro:{ key:"guoxing_pro", name:"國興集團專業職", code:"86660894", admin:false },
-    moodshop:{ key:"moodshop", name:"MOODSHOP", code:"90553951", admin:false },
+    guoxing:{ key:"guoxing", name:"國興集團中高階", code:"86660894001", hrPassword:"86660894001888", admin:false },
+    guoxing_pro:{ key:"guoxing_pro", name:"國興集團專業職", code:"86660894", hrPassword:"86660894888", admin:false },
+    moodshop:{ key:"moodshop", name:"MOODSHOP", code:"90553951", hrPassword:"90553951888", admin:false },
     admin:{ key:"admin", name:"系統管理者", code:"123458", admin:true }
   };
   var COMPANY_ORDER = ["guoxing","guoxing_pro","moodshop","admin"];
@@ -745,6 +773,7 @@
   // ---------- company entry ----------
   function renderCompanySelect(){
     var select = $("companySelect");
+    var prevValue = select.value;
     select.innerHTML = "";
     COMPANY_ORDER.forEach(function(key){
       var c = COMPANIES[key];
@@ -753,8 +782,27 @@
       opt.textContent = c.name;
       select.appendChild(opt);
     });
+    if(prevValue && COMPANIES[prevValue]){ select.value = prevValue; }
   }
   renderCompanySelect();
+
+  function loadCompanies(){
+    gasGet("listCompanies").then(function(res){
+      if(res && res.ok && res.companies){
+        res.companies.forEach(function(c){
+          if(!c.key){ return; }
+          COMPANIES[c.key] = { key:c.key, name:c.name, code:c.code, hrPassword:c.hrPassword, admin:false, dynamic:true };
+          if(COMPANY_ORDER.indexOf(c.key) === -1){
+            COMPANY_ORDER.splice(COMPANY_ORDER.indexOf("admin"), 0, c.key);
+          }
+        });
+        renderCompanySelect();
+      }
+    }).catch(function(err){
+      console.error("讀取公司清單失敗(可能是後端尚未部署公司管理功能)", err);
+    });
+  }
+  loadCompanies();
 
   $("companySelectSubmit").addEventListener("click", function(){
     var key = $("companySelect").value;
@@ -860,7 +908,7 @@
   });
   function submitHrAuth(){
     var pw = $("hrPasswordInput").value.trim();
-    var expected = state.company ? (COMPANIES[state.company].code + "888") : null;
+    var expected = state.company && COMPANIES[state.company] ? COMPANIES[state.company].hrPassword : null;
     if(expected && pw === expected){
       openRoster();
     } else {
@@ -1277,6 +1325,7 @@
   function openRoster(){
     showScreen("screen-roster");
     var isAdmin = state.company && COMPANIES[state.company].admin;
+    $("companyManageBtn").style.display = isAdmin ? "" : "none";
     var filterSelect = $("companyFilterSelect");
     if(isAdmin){
       filterSelect.style.display = "";
@@ -1674,6 +1723,72 @@
 
   $("teamReportBackBtn").addEventListener("click", function(){
     showScreen("screen-roster");
+  });
+
+  function renderCompanyManageList(){
+    var container = $("cmList");
+    var items = COMPANY_ORDER.filter(function(k){ return !COMPANIES[k].admin; });
+    if(items.length === 0){
+      container.innerHTML = '<div class="empty-state">目前尚無公司帳號。</div>';
+      return;
+    }
+    var rows = items.map(function(k){
+      var c = COMPANIES[k];
+      return '<tr><td>'+escapeHtml(c.name)+'</td><td>'+escapeHtml(c.code)+'</td><td>'+escapeHtml(c.hrPassword || "—")+'</td></tr>';
+    }).join("");
+    container.innerHTML = '<table><thead><tr><th>公司名稱</th><th>入口密碼</th><th>人資部密碼</th></tr></thead><tbody>'+rows+'</tbody></table>';
+  }
+
+  $("companyManageBtn").addEventListener("click", function(){
+    $("cmName").value = "";
+    $("cmCode").value = "";
+    $("cmHrPw").value = "";
+    $("cmError").textContent = "";
+    $("cmStatus").textContent = "";
+    renderCompanyManageList();
+    showScreen("screen-company-manage");
+  });
+
+  $("cmBackBtn").addEventListener("click", function(){
+    showScreen("screen-roster");
+  });
+
+  $("cmSaveBtn").addEventListener("click", function(){
+    var name = $("cmName").value.trim();
+    var code = $("cmCode").value.trim();
+    var hrPw = $("cmHrPw").value.trim();
+    $("cmError").textContent = "";
+    if(!name || !code || !hrPw){
+      $("cmError").textContent = "請完整填寫公司名稱、入口密碼與人資部密碼。";
+      return;
+    }
+    var dupCode = COMPANY_ORDER.some(function(k){ return !COMPANIES[k].admin && COMPANIES[k].code === code; });
+    if(dupCode){
+      $("cmError").textContent = "此入口密碼已被其他公司使用，請設定不同的密碼。";
+      return;
+    }
+    $("cmStatus").textContent = "建立中…";
+    gasPost("saveCompany", { company: { name:name, code:code, hrPassword:hrPw } }).then(function(res){
+      if(res && res.ok && res.result && res.result.key){
+        var key = res.result.key;
+        COMPANIES[key] = { key:key, name:name, code:code, hrPassword:hrPw, admin:false, dynamic:true };
+        if(COMPANY_ORDER.indexOf(key) === -1){
+          COMPANY_ORDER.splice(COMPANY_ORDER.indexOf("admin"), 0, key);
+        }
+        renderCompanySelect();
+        renderCompanyManageList();
+        $("cmName").value = "";
+        $("cmCode").value = "";
+        $("cmHrPw").value = "";
+        $("cmStatus").textContent = "已成功建立「"+name+"」的公司帳號，員工現在就能在入口選單選到這間公司。";
+      } else {
+        console.error("建立公司帳號失敗", res);
+        $("cmStatus").textContent = "建立失敗，請確認 Google Apps Script 是否已部署公司管理功能，或稍後再試一次。";
+      }
+    }).catch(function(err){
+      console.error("建立公司帳號失敗", err);
+      $("cmStatus").textContent = "建立失敗，請確認網路連線後再試一次。";
+    });
   });
 
   function exportTeamReportPDF(){
